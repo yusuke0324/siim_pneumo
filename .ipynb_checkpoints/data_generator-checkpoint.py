@@ -10,34 +10,7 @@ import threading
 from tensorflow.python.keras.utils import to_categorical
 from scipy import ndimage
 from keras.utils import Sequence
-from sklearn.model_selection import train_test_split
 import cv2
-from copy import deepcopy # this will be deep copy: refer here https://www.geeksforgeeks.org/copy-python-deep-copy-shallow-copy/
-from albumentations import (
-    Compose, HorizontalFlip, CLAHE, HueSaturationValue,
-    RandomBrightness, RandomContrast, RandomGamma,OneOf,
-    ToFloat, ShiftScaleRotate,GridDistortion, ElasticTransform, JpegCompression, HueSaturationValue,
-    RGBShift, RandomBrightness, RandomContrast, Blur, MotionBlur, MedianBlur, GaussNoise,CenterCrop,
-    IAAAdditiveGaussianNoise,GaussNoise,OpticalDistortion,RandomSizedCrop
-)
-# from https://www.kaggle.com/meaninglesslives/unet-plus-plus-with-efficientnet-encoder
-# NOTE: in my data generator, this augmentation will be applied BEFORE resize.
-# That's why random sized crop should be range 624 - 1024
-AUGMENTATIONS = Compose([
-    HorizontalFlip(p=0.5),
-    OneOf([
-        RandomContrast(),
-        RandomGamma(),
-        RandomBrightness(),
-         ], p=0.3),
-    OneOf([
-        ElasticTransform(alpha=120, sigma=120 * 0.05, alpha_affine=120 * 0.03),
-        GridDistortion(),
-        OpticalDistortion(distort_limit=2, shift_limit=0.5),
-        ], p=0.3),
-    RandomSizedCrop(min_max_height=(624, 1024), height=1024, width=1024,p=0.25),
-    ToFloat(max_value=1)
-],p=1)
 
 
 #################### Now make the data generator threadsafe ####################
@@ -101,9 +74,12 @@ class DataGenerator(Sequence):
                  seed=1,
                  batch_size=32,
                  train_split=0.9,
-                 aug=AUGMENTATIONS,
-                 # mode='train',
-                 stratified=True
+                 aug=True,
+                 flip=False,
+                 maxshift=[0, 20, 20],
+                 maxrotate=10,
+                 mode='train'
+
                  ):
 
         self.data_path = data_path
@@ -113,59 +89,40 @@ class DataGenerator(Sequence):
         self.seed = seed
         self.batch_size = batch_size
         self.train_split = train_split
-        self.stratified = stratified
+
+        self.mode = mode
         self.all_data_paths = glob(data_path+'*.npy')
         self.data_num = len(self.all_data_paths)
         self.val_index = 0
         self.train_paths, self.val_paths = self._split_train_val()
-        self.aug=aug
+        if self.mode == 'train':
+            self.data_paths = self.train_paths
+        elif self.mode == 'val':
+            self.data_paths = self.val_paths
+        self.aug = aug
+        self.flip = flip
+        self.maxshift = maxshift
+        self.maxrotate = maxrotate
 
     def __len__(self):
         'Denotes the number of batches per epoch'
         return int(np.floor(len(self.data_paths) / self.batch_size))
 
     
-    def _split_train_val(self, stratified=True):
+    def _split_train_val(self):
 
         # shuffle with seed
         random.seed(self.seed)
         random.shuffle(self.all_data_paths)
         
-        if self.stratified:
-            # stratified based on class (0,1)
-            # load csv and get class info for all paths and split them with stratify=class
-            csv_path = '/'.join(self.data_path.split('/')[:-2]) + '/meta.csv'
-            all_data =pd.read_csv(csv_path)
-            # since all_data don't have npy path in fold (only have original path), use image_id instead of path
-            train_all_data= pd.DataFrame([[path.split('/')[-1].split('.npy')[0], path] for path in self.all_data_paths], columns=['image_id', 'npy_path'])
-            image_id_class_df = train_all_data.merge(all_data, on='image_id')
-
-            paths = image_id_class_df['npy_path'].values
-            classes = image_id_class_df['class'].values
-
-            train_paths, val_paths, _, _ = train_test_split(paths, classes, stratify=classes, test_size=1-self.train_split)
-
-        else:
-            train_paths = self.all_data_paths[0:int(self.train_split * self.data_num)]
-            val_paths = self.all_data_paths[int(self.train_split * self.data_num):self.data_num]
+        train_paths = self.all_data_paths[0:int(self.train_split * self.data_num)]
+        val_paths = self.all_data_paths[int(self.train_split * self.data_num):self.data_num]
 
         return train_paths, val_paths
 
     def on_epoch_end(self):
         'Updates indexes after each epoch'
         np.random.shuffle(self.data_paths)
-
-    def get_train_val_gens(self):
-        # make train gen
-        train_gen = deepcopy(self)
-        train_gen.mode = 'train'
-        train_gen.data_paths = self.train_paths
-        # make val gen
-        val_gen = deepcopy(self)
-        val_gen.mode = 'val'
-        val_gen.data_paths = self.val_paths
-
-        return train_gen, val_gen
 
 
     def __getitem__(self, index):
@@ -184,11 +141,8 @@ class DataGenerator(Sequence):
             mask = data['mask']
 
             # do augomentation before all other preprocessing!
-            if (self.mode=='train') and (self.aug is not None):
-                # img, mask = _augmentation(img, mask, flip=self.flip, maxshift=self.maxshift, maxrotate=self.maxrotate, flag2d=True)
-                auged = self.aug(image=img, mask=mask)
-                img = auged['image']
-                mask = auged['mask']
+            if self.mode=='train' and self.aug:
+                img, mask = _augmentation(img, mask, flip=self.flip, maxshift=self.maxshift, maxrotate=self.maxrotate, flag2d=True)
 
             #[TODO] need to crop img and mask
 
@@ -302,7 +256,6 @@ def _normalize(image):
     return image
 
 
-# this is old. it's no longer used.
 def _augmentation(volume, mask, flip=False, maxshift=[0, 0, 0], maxrotate=0, flag2d=False):
     '''
     augmentation. this can be used for volume and mask 

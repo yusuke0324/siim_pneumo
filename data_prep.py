@@ -166,7 +166,9 @@ def _save_img_mask(dcm_path, rle_list, save_path):
                 mask = np.add(mask, mask2)
 
     # originally, mask is 0 and 255. change the values to 0 and 1
-    mask[mask == 255] = 1
+    # mask[mask == 255] = 1
+    # there are overlapping masks. it's safe to convert all non 0 to 1
+    mask = np.where(mask>0, 1, 0)
     mask = np.array(mask, dtype=np.uint8)
 
     np.save(save_path,{'img':img, 'mask':mask})
