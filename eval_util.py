@@ -2,13 +2,61 @@ import numpy as np
 import pandas as pd
 from glob import glob
 from tqdm import tqdm
+import data_prep, ensemble_util
 import utils
 from tensorflow.python.keras.utils import to_categorical
 from multiprocessing import Pool
 
 
+def eval_all_models_pred(pred_data_dir_base='/data/pneumo_log/val_1/val_predictions/2019_0805_0344/',
+                         ensemble=True, thresh_list=None, cpu_num=16, save=True, score_column_name='score'):
+    
+    # got only folders
+    pred_data_dir_list = glob(pred_data_dir_base + '/*/')
+    # for pred_data_dir in pred_data_dir_list:
+    #     # each model folder
+    #     print('start to eval {}'.format(pred_data_dir))
+    #     eval_all_pred(pred_data_dir=pred_data_dir + '/')
 
-def eval_all_pred(pred_data_dir='/data/pneumo_log/val_1/val_predictions/2019_0805_0344/', thresh_list=None, cpu_num=16, save=True):
+    if ensemble:
+        # save binary predictions for each
+        _ensemble_pred(pred_data_dir_list=pred_data_dir_list, column_name=score_column_name, cpu_num=cpu_num)
+        # save final ensembled predictions
+        save_final_pred_path = pred_data_dir_base + '/ensemble_preds/'
+        ensemble_util.ensembled_dirs(binary_mask_path_list=pred_data_dir_base + '/*/*/', cpu_num=cpu_num, save_path=save_final_pred_path)
+        # eval. these preds should be binary by now. just set 0.5
+        df = eval_all_pred(pred_data_dir=save_final_pred_path, thresh_list=[0.5])
+        return df
+
+
+
+
+def _ensemble_pred(pred_data_dir_list=['/data/pneumo_log/val_1/val_predictions/2019_0815_1742/best_weights/', '/data/pneumo_log/val_1/val_predictions/2019_0815_1742/snapshot_model_2/'],
+                    column_name='score', cpu_num=16):
+
+    '''
+    pred_data_dir_list is a list of path that saves predictions (from pred_util._save_preds()) and should have data frame with thresh and column name
+    if you want to use TTA column_name should be 'mean_score'
+    '''
+    print('start ensemble...')
+    for pred_data_dir in pred_data_dir_list:
+
+        df = pd.read_csv(pred_data_dir + '/thresh_evaluation.csv')
+
+        # after groupby the index will be thresh so just get index as the thresh value
+        best_thresh = df.groupby('thresh').mean()[column_name].idxmax()
+        best_score = df.groupby('thresh').mean()[column_name].max()
+        print('for {}, best score is {} at thresh={}'.format(pred_data_dir, best_score, best_thresh))
+
+        p = Pool(processes=cpu_num)
+        # set save_binary is True and save binary pred based on the best thresh
+        job_args = [(data_path, [best_thresh], True) for data_path in glob(pred_data_dir + '/*.npy')]
+
+        list(tqdm(p.imap(_wrap_load_eval_w_thresh_list, job_args), total=len(job_args)))
+
+
+
+def eval_all_pred(pred_data_dir='/data/pneumo_log/val_1/val_predictions/2019_0805_0344/best_weights/', thresh_list=None, cpu_num=16, save=True):
     '''
     Return all scores based on thresh in thresh_list for all files under pred_data_dir. pred_data_dir should be from pred_util._save_preds()
     '''
@@ -32,7 +80,10 @@ def eval_all_pred(pred_data_dir='/data/pneumo_log/val_1/val_predictions/2019_080
 def _wrap_load_eval_w_thresh_list(args):
     return _load_eval_w_thresh_list(*args)
 
-def _load_eval_w_thresh_list(data_path, thresh_list=[0.5]):
+def _load_eval_w_thresh_list(data_path, thresh_list=[0.5], save_binary=False):
+    '''
+    set save_path if save_binary is True.
+    '''
     
     data = np.load(data_path)[()]
     mask = data['mask']
@@ -46,16 +97,25 @@ def _load_eval_w_thresh_list(data_path, thresh_list=[0.5]):
     result_list = []
     for thresh in thresh_list:
         result = {}
-        dice = evaluation(mask, pred,  thresh)
+        dice, pred = evaluation(mask, pred,  thresh)
+        # for save
+        data = {'pred':pred}
         result['score'] = dice
         if 'aug_pred' in data.keys():
-            aug_dice = evaluation(mask, aug_pred,  thresh)
-            mean_dice = evaluation(mask, mean_pred,  thresh)
+            aug_dice, aug_pred = evaluation(mask, aug_pred,  thresh)
+            mean_dice, mean_pred = evaluation(mask, mean_pred,  thresh)
             result['aug_score'] = aug_dice
             result['mean_score'] = mean_dice
+            data['aug_pred'] = aug_pred
+            data['mean_pred'] = mean_pred
             
         result['image_id'] = image_id
         result['thresh'] = thresh
+
+        if save_binary:
+            save_dir = '/'.join(data_path.split('/')[:-1]) + '/binary_thresh_' + str(thresh) + '/'
+            data_prep._make_dir(save_dir)
+            file_name = save_dir + '/' + str(image_id)
         
         result_list.append(result)
 
@@ -86,19 +146,20 @@ def evaluation(gt_mask, pred, thresh=0.5):
     pd = np.greater(pred, 0)
     # if the ground truth and prediction have no mask, return 1
     if (gt.sum() == 0) and (pd.sum() == 0):
-        return 1.0
+        return 1.0, pred
     # if the ground truth has no mask but prediction has masks, return 0
     elif (gt.sum() == 0) and (pd.sum() > 0):
-        return 0.0
+        return 0.0, pred
     # if the ground truth has mask but prediction has no masks, ofcause return 0
     elif (gt.sum() > 0) and (pd.sum() == 0):
-        return 0.0
+        return 0.0, pred
         
     else:
         dice = 2*np.logical_and(pd, gt).sum()/(
         pd.sum() + gt.sum()
     )
-        return dice
+        
+        return dice, pred
         
 
     

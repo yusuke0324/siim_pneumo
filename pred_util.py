@@ -11,6 +11,9 @@ from tensorflow.python.keras.utils import to_categorical
 import cv2
 
 def _pred_img(image, model):
+    '''
+    image can be pre preprocessed image. (original numpy)
+    '''
     
     #(256, 256)
     input_shape = model.layers[0].input_shape[1:3]
@@ -45,10 +48,22 @@ def _load_model(model_path='/data/pneumo_log/val_1//2019_0805_0344/best_weights.
            'dice_coef':loss_util.create_dice_coef(),
            'dice_coef_flat':loss_util.dice_coef_flat,
            'bce_dice_loss':loss_util.bce_dice_loss,
-           'dice_loss_flat':loss_util.dice_loss_flat,}
+           'dice_loss_flat':loss_util.dice_loss_flat,
+           'my_dice_metric':loss_util.my_dice_metric}
     
     return load_model(model_path, custom_objects=custom_objects)
 
+def save_preds_all_models(model_base_path='/data/pneumo_log/val_1/2019_0805_0344/', 
+                          data_path='/data/pneumo/fold/1/',
+                          tta=True):
+    '''
+    save all predictions as numpy with all models under the model_base_path
+    '''
+
+    model_path_list = glob(model_base_path + '/*[.h5, .hdf5]')
+
+    for model_path in model_path_list:
+        _save_preds(model_path=model_path, data_path=data_path, tta=tta)
 
 def _save_preds(model_path='/data/pneumo_log/val_1/2019_0805_0344/best_weights.hdf5',
                 data_path='/data/pneumo/fold/1/',
@@ -58,15 +73,16 @@ def _save_preds(model_path='/data/pneumo_log/val_1/2019_0805_0344/best_weights.h
     save prediction as numpy. if tta=True, save horizontal flip too. The saved 'aug_pred' mask has been fliped again.
 
     '''
-    
+    print('start pred with {}'.format(model_path))
     data_path_list = glob(data_path + '*.npy')
     
     #'/data/pneumo_log/val_1/'
     base_save_path = '/'.join(model_path.split('/')[:-2])
     #2019_0805_0344
     folder_name = model_path.split('/')[-2]
-    # '/data/pneumo_log/val_1/val_predictions/2019_0805_0344/'
-    save_path = base_save_path + '/val_predictions/' + folder_name + '/'
+    # '/data/pneumo_log/val_1/val_predictions/2019_0805_0344/best_weights/'
+    # extended for snapshots
+    save_path = base_save_path + '/val_predictions/' + folder_name + '/' + model_path.split('/')[-1].split('.')[0] + '/'
     
     # loading model
     model = _load_model(model_path=model_path)

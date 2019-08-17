@@ -25,7 +25,7 @@ import multiprocessing
 import keras
 from time import sleep
 import matplotlib.pyplot as plt
-
+from math import floor
 import tensorflow as tf
 
 
@@ -144,12 +144,15 @@ class PatchedModelCheckpoint(Callback):
 
 
 # https://www.kaggle.com/meaninglesslives/unet-plus-plus-with-efficientnet-encoder
+# for snapshot and save models refer 
+# https://machinelearningmastery.com/snapshot-ensemble-deep-learning-neural-network/
 # cosine lr schedule
-class SnapshotScheduleBuilder:
-    def __init__(self, nb_epochs, nb_snapshots, init_lr=0.1):
+class SnapshotEnsemble(Callback):
+    def __init__(self, nb_epochs, nb_snapshots, save_dir, init_lr=0.1):
         self.T = nb_epochs
         self.M = nb_snapshots
         self.alpha_zero = init_lr
+        self.save_dir = save_dir
 
     def _cosine_anneal_schedule(self, t):
             cos_inner = np.pi * (t % (self.T // self.M))  # t - 1 is used when t has 1-based indexing.
@@ -157,9 +160,36 @@ class SnapshotScheduleBuilder:
             cos_out = np.cos(cos_inner) + 1
             return float(self.alpha_zero / 2 * cos_out)
 
-    def get_scheduler(self):
-        # put thie return into callbacks
-        return LearningRateScheduler(schedule=self._cosine_anneal_schedule)
+        # calculate and set learning rate at the start of the epoch
+    def on_epoch_begin(self, epoch, logs={}):
+        # calculate learning rate
+        lr = self._cosine_anneal_schedule(epoch)
+        # set learning rate
+        K.set_value(self.model.optimizer.lr, lr)
+        
+    # def get_scheduler(self):
+    #     # put thie return into callbacks
+    #     return LearningRateScheduler(schedule=self._cosine_anneal_schedule)
+
+    # ref https://machinelearningmastery.com/snapshot-ensemble-deep-learning-neural-network/
+    # save models at the end of each cycle
+    def on_epoch_end(self, epoch, logs={}):
+        # check if we can save model
+        epochs_per_cycle = floor(self.T / self.M)
+        # epoch starts 0
+        if epoch != 0 and (epoch + 1) % epochs_per_cycle == 0:
+            print('save if')
+            # save model to file
+            filename = self.save_dir + "/snapshot_model_%d.h5" % int((epoch + 1) / epochs_per_cycle)
+            saved_correctly = False
+            while not saved_correctly:
+                try:
+                    self.model.save(filename)
+                    saved_correctly = True
+                    print('>saved snapshot %s, epoch %d' % (filename, epoch))
+                except Exception as error:
+                    print('Error while trying to save the model: {}.\nTrying again...'.format(error))
+                    sleep(5)
 
 
 
@@ -189,7 +219,24 @@ def _make_dir(dir_name):
     if not os.path.exists('dir_name'):
         os.makedirs(dir_name)
 
-def train(model, train_gen, val_gen, steps_per_epoch=None, optimizer='adam', log_dir='./log', epochs=100, loss='binary_crossentropy', metrics=['accuracy'], lr_mode='reduce', reduce_lr_factor=0.2, reduce_lr_patience=10, validation_steps=None):
+def train(model,
+          train_gen,
+          val_gen,
+          steps_per_epoch=None,
+          optimizer='adam',
+          log_dir='./log',
+          epochs=100,
+          loss='binary_crossentropy',
+          metrics=['accuracy'],
+          lr_mode='reduce',
+          reduce_lr_factor=0.2,
+          reduce_lr_patience=10,
+          validation_steps=None,
+          check_point_monitor='val_loss',
+          check_point_mode='auto',
+          nb_snapshots=1,
+          init_lr=1e-3
+          ):
     if steps_per_epoch is None:
         steps_per_epoch = len(train_gen)
 
@@ -201,7 +248,8 @@ def train(model, train_gen, val_gen, steps_per_epoch=None, optimizer='adam', log
     fpath = log_dir + '/weights.{epoch:02d}-{loss:.2f}-{val_loss:.2f}.hdf5'
     # callback
     tb_cb = TensorBoard(log_dir=log_dir, histogram_freq=1)
-    cp_cb = PatchedModelCheckpoint(filepath=log_dir+'/best_weights.hdf5', monitor='val_loss', verbose=1, save_best_only=True, mode='auto')
+    cp_cb = PatchedModelCheckpoint(filepath=log_dir+'/best_weights.hdf5', monitor=check_point_monitor, verbose=1, save_best_only=True, mode=check_point_mode)
+    # cp_cb = ModelCheckpoint(filepath=log_dir+'/best_weights.hdf5', monitor=check_point_monitor, verbose=1, save_best_only=True, mode='auto')
     batchLogCallback = LambdaCallback(on_epoch_end=_epochOutput)
     # csv_logger = CSVLogger(log_dir + '/training.log')
     csv_logger = AllLogger(log_dir + '/training.log')
@@ -209,8 +257,9 @@ def train(model, train_gen, val_gen, steps_per_epoch=None, optimizer='adam', log
     if lr_mode == 'reduce':
         callbacks.append(ReduceLROnPlateau(factor=reduce_lr_factor, patience=reduce_lr_patience, verbose=1))
     elif lr_mode == 'cosine':
-        schedule_builder = SnapshotScheduleBuilder(nb_epochs=epochs, nb_snapshots=1, init_lr=1e-3)
-        callbacks.append(schedule_builder.get_scheduler())
+        snapshot = SnapshotEnsemble(nb_epochs=epochs, nb_snapshots=nb_snapshots, save_dir=log_dir,init_lr=init_lr)
+        # callbacks.append(schedule_builder.get_scheduler())
+        callbacks.append(snapshot)
 
 
     model.compile(optimizer=optimizer, loss=loss, metrics=metrics)

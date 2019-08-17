@@ -3,8 +3,55 @@ import keras.backend as K
 from keras.losses import binary_crossentropy # what is the difference with K.binary_crossentropy
 import tensorflow as tf
 
+# ref https://www.kaggle.com/c/siim-acr-pneumothorax-segmentation/discussion/101429#latest-592529
+def lovasz_loss(truth, logit, margin=[1,5]):
+
+    def compute_lovasz_gradient(truth): #sorted
+        truth_sum    = K.sum(truth)
+        intersection = truth_sum - K.cumsum(truth, 0)
+        union        = truth_sum + K.cumsum(1 - truth, 0)
+        jaccard      = 1. - intersection / union
+        jaccard      = K.concatenate([jaccard[0:1], jaccard[1:] - jaccard[:-1]], axis=0)
+
+        gradient     = jaccard
+        return gradient
+
+    def lovasz_hinge_one(truth , logit):
+
+        m = tf.where(K.equal(truth, 1), margin[1] * K.ones_like(truth), margin[0] * K.ones_like(truth))
+
+        truth = K.cast(truth, dtype = logit.dtype)
+        sign  = 2. * truth - 1.
+        hinge = (m - logit * K.stop_gradient(sign))
+        hinge, permutation = tf.nn.top_k(hinge, k=K.shape(hinge)[0])
+        hinge = K.relu(hinge)
+
+        truth = K.gather(truth, permutation)
+        gradient = compute_lovasz_gradient(truth)
+
+        loss = K.dot(K.expand_dims(hinge, 0), K.stop_gradient(K.expand_dims(gradient, -1)))
+        
+        return loss
+
+    #----
+    batch_size = K.shape(logit)[0]
+    loss = K.map_fn(lambda x: lovasz_hinge_one(truth[x], logit[x]), K.arange(batch_size), dtype='float32')
+
+    return loss
+
+def criterion_pixel(truth_pixel, logit_pixel):
+    batch_size = K.shape(logit_pixel)[0]
+    logit = K.reshape(logit_pixel, (batch_size,-1))
+    truth = K.reshape(truth_pixel, (batch_size,-1))
+
+    loss = lovasz_loss(truth, logit)  
+
+    loss = K.mean(loss)
+    return loss
+
+
 # https://www.kaggle.com/cpmpml/fast-iou-metric-in-numpy-and-tensorflow
-def get_iou_vector(A, B):
+def get_dice_vector(A, B):
     # Numpy version    
     batch_size = A.shape[0]
     metric = 0.0
@@ -18,25 +65,26 @@ def get_iou_vector(A, B):
             metric += (pred == 0)
             continue
         
-        # non empty mask case.  Union is never empty 
+        # non empty mask case.  denominator is never empty 
         # hence it is safe to divide by its number of pixels
-        intersection = np.sum(t * p)
-        union = true + pred - intersection
-        iou = intersection / union
+        numerataor = 2. * np.sum(t * p)
+        denominator = true + pred
+        dice = numerataor / denominator
         
-        # iou metrric is a stepwise approximation of the real iou over 0.5
-        iou = np.floor(max(0, (iou - 0.45)*20)) / 10
+        # why...?
+        # dice metrric is a stepwise approximation of the real iou over 0.5
+        # dice = np.floor(max(0, (dice - 0.45)*20)) / 10
         
-        metric += iou
+        metric += dice
         
     # teake the average over all images in batch
     metric /= batch_size
     return metric
 
 
-def my_iou_metric(label, pred):
+def my_dice_metric(label, pred):
     # Tensorflow version
-    return tf.py_func(get_iou_vector, [label, pred > 0.5], tf.float64)
+    return tf.py_func(get_dice_vector, [label, pred > 0.5], tf.float64)
 
 
 def dice_coef_flat(y_true, y_pred):
