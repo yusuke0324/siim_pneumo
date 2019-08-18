@@ -13,17 +13,17 @@ def eval_all_models_pred(pred_data_dir_base='/data/pneumo_log/val_1/val_predicti
     
     # got only folders
     pred_data_dir_list = glob(pred_data_dir_base + '/*/')
-    # for pred_data_dir in pred_data_dir_list:
-    #     # each model folder
-    #     print('start to eval {}'.format(pred_data_dir))
-    #     eval_all_pred(pred_data_dir=pred_data_dir + '/')
+    for pred_data_dir in pred_data_dir_list:
+        # each model folder
+        print('start to eval {}'.format(pred_data_dir))
+        eval_all_pred(pred_data_dir=pred_data_dir + '/')
 
     if ensemble:
-        # save binary predictions for each
-        _ensemble_pred(pred_data_dir_list=pred_data_dir_list, column_name=score_column_name, cpu_num=cpu_num)
+        # save binary predictions at the best thresh for each
+        _save_binary_best_thresh(pred_data_dir_list=pred_data_dir_list, column_name=score_column_name, cpu_num=cpu_num)
         # save final ensembled predictions
         save_final_pred_path = pred_data_dir_base + '/ensemble_preds/'
-        ensemble_util.ensembled_dirs(binary_mask_path_list=pred_data_dir_base + '/*/*/', cpu_num=cpu_num, save_path=save_final_pred_path)
+        ensemble_util.ensemble_dirs(binary_mask_path_list=glob(pred_data_dir_base + '/*/*/'), cpu_num=cpu_num, save_path=save_final_pred_path)
         # eval. these preds should be binary by now. just set 0.5
         df = eval_all_pred(pred_data_dir=save_final_pred_path, thresh_list=[0.5])
         return df
@@ -31,7 +31,7 @@ def eval_all_models_pred(pred_data_dir_base='/data/pneumo_log/val_1/val_predicti
 
 
 
-def _ensemble_pred(pred_data_dir_list=['/data/pneumo_log/val_1/val_predictions/2019_0815_1742/best_weights/', '/data/pneumo_log/val_1/val_predictions/2019_0815_1742/snapshot_model_2/'],
+def _save_binary_best_thresh(pred_data_dir_list=['/data/pneumo_log/val_1/val_predictions/2019_0815_1742/best_weights/', '/data/pneumo_log/val_1/val_predictions/2019_0815_1742/snapshot_model_2/'],
                     column_name='score', cpu_num=16):
 
     '''
@@ -63,6 +63,9 @@ def eval_all_pred(pred_data_dir='/data/pneumo_log/val_1/val_predictions/2019_080
     
     if thresh_list is None:
         thresh_list = np.linspace(0, 1, 21)#0, 0.05, 0.1,,, so on
+        thresh_list = np.concatenate([thresh_list,np.linspace(0, 0.05, 10)],axis=0) # 0, 0.00555556, 0.0111, ...
+        thresh_list = np.unique(thresh_list)    
+
     data_path_list = glob(pred_data_dir + '/*.npy')
     
     p = Pool(processes=cpu_num)
@@ -97,17 +100,17 @@ def _load_eval_w_thresh_list(data_path, thresh_list=[0.5], save_binary=False):
     result_list = []
     for thresh in thresh_list:
         result = {}
-        dice, pred = evaluation(mask, pred,  thresh)
-        # for save
-        data = {'pred':pred}
+        dice, binary_pred = evaluation(mask, pred,  thresh)
+        # for save. need mask here to use this functin to the saved data to evaluate
+        data = {'pred':binary_pred, 'mask':mask}
         result['score'] = dice
         if 'aug_pred' in data.keys():
-            aug_dice, aug_pred = evaluation(mask, aug_pred,  thresh)
-            mean_dice, mean_pred = evaluation(mask, mean_pred,  thresh)
+            aug_dice, aug_binary_pred = evaluation(mask, aug_pred,  thresh)
+            mean_dice, mean_binary_pred = evaluation(mask, mean_pred,  thresh)
             result['aug_score'] = aug_dice
             result['mean_score'] = mean_dice
-            data['aug_pred'] = aug_pred
-            data['mean_pred'] = mean_pred
+            data['aug_pred'] = aug_binary_pred
+            data['mean_pred'] = mean_binary_pred
             
         result['image_id'] = image_id
         result['thresh'] = thresh
@@ -116,6 +119,7 @@ def _load_eval_w_thresh_list(data_path, thresh_list=[0.5], save_binary=False):
             save_dir = '/'.join(data_path.split('/')[:-1]) + '/binary_thresh_' + str(thresh) + '/'
             data_prep._make_dir(save_dir)
             file_name = save_dir + '/' + str(image_id)
+            np.save(file_name, data)
         
         result_list.append(result)
 
@@ -159,6 +163,7 @@ def evaluation(gt_mask, pred, thresh=0.5):
         pd.sum() + gt.sum()
     )
         
+        # return dice and binary pred
         return dice, pred
         
 

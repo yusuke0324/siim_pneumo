@@ -103,7 +103,8 @@ class DataGenerator(Sequence):
                  train_split=0.9,
                  aug=AUGMENTATIONS,
                  # mode='train',
-                 stratified=True
+                 stratified=True,
+                 additional_data_path_list=None, #['/data/pneumo_log/val_1/2019_0815_1742/submission/best_weights//pseudo/*.npy','/data/pneumo_log/val_1/val_predictions/2019_0815_1742/best_weights/pseudo_train_fold/*.npy'],
                  ):
 
         self.data_path = data_path
@@ -118,13 +119,22 @@ class DataGenerator(Sequence):
         self.data_num = len(self.all_data_paths)
         self.val_index = 0
         self.train_paths, self.val_paths = self._split_train_val()
+        self.additional_data_path_list=additional_data_path_list
+        self._add_data()
         self.aug=aug
 
     def __len__(self):
         'Denotes the number of batches per epoch'
         return int(np.floor(len(self.data_paths) / self.batch_size))
 
-    
+    # the additional data should be pseudo labeling
+    # this should be called AFTER train, val split and just add them to TRAIN
+    def _add_data(self):
+        if self.additional_data_path_list is None:
+            return
+        else:
+            for path in self.additional_data_path_list:
+                self.train_paths = np.concatenate([glob(path+'/*.npy'), self.train_paths], axis=0)
     def _split_train_val(self, stratified=True):
 
         # shuffle with seed
@@ -180,8 +190,8 @@ class DataGenerator(Sequence):
         for path in paths:
 
             data = np.load(path)[()]
-            img = data['img']
             mask = data['mask']
+            img = data['img']
 
             # do augomentation before all other preprocessing!
             if (self.mode=='train') and (self.aug is not None):
@@ -196,8 +206,8 @@ class DataGenerator(Sequence):
             # keep 0 or 1
             mask = cv2.resize(mask, self.target_shape, interpolation=cv2.INTER_NEAREST)
 
-            img = _normalize(img)
 
+            img = _normalize(img)
 
             # expand dim for 1 channel
 
@@ -205,12 +215,12 @@ class DataGenerator(Sequence):
                 img = np.expand_dims(img, axis=-1)
             elif self.img_ch == 3:
                 img = np.stack((img, img, img), axis=-1)
+            img_list.append(img)
             mask = np.expand_dims(mask, axis=-1)
 
-            img_list.append(img)
+
             mask_list.append(mask)
             # roi_list.append(roi)
-
             if len(img_list) == self.batch_size:
                 volumes = np.array(img_list)
                 masks = np.array(mask_list)
